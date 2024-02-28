@@ -1,0 +1,65 @@
+version: "1"
+
+services:
+  mlflow-db:
+    image: postgres:14.0 # PostgreSQL 이미지
+    container_name: mlflow-db # 컨테이너 이름
+    environment:
+      POSTGRES_USER: mlflowuser # DB 접근을 위한 사용자 이름
+      POSTGRES_PASSWORD: qwer1234 # DB 접근을 위한 사용 패스워드
+      POSTGRES_DB: mlflowdatabase # DB 이름
+    healthcheck: # DB 서버가 잘 띄워졌는지 상태를 확인하기 위해 상태를 체크
+      test: ["CMD", "pg_isready","-q","-U","mlflowuser","-d","mlflowdatabase"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mlflow-artifact-store:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z # MinIO 이미지
+    container_name: mlflow-artifact-store # 컨테이너 이름
+    ports: # 실행 포트
+      - 9000:9000
+      - 9001:9001
+    environment:
+      MINIO_ROOT_USER: minio # MinIO에 접근하기 위한 사용자 이름
+      MINIO_ROOT_PASSWORD: qwer1234 # MinIO에 접근하기 위한 비밀번호
+    command: server /data/minio --console-address :9001 # MinIO 서버 실행 명령어
+    # --console-address를 통해 9001 포트로 MinIO에 접근할 수 있도록 주소를 열어줌
+    healthcheck: # 상태체크
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  
+  mlflow-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mlflow-server
+    depends_on: # MLflow 서버가 띄워지기 전에, PostgreSQL DB, MinIO 서버를 먼저 띄우도록 한다.
+      mlflow-db:
+        condition: service_healthy
+      mlflow-artifact-store:
+        condition: service_healthy
+    ports:
+      - 5001:5000
+    environment: 
+      AWS_ACCESS_KEY_ID: minio # AWS S3의 credential 정보, MINIO_ROOT_USER와 동일
+      AWS_SECRET_ACCESS_KEY: qwer1234 # AWS S3의 credential 정보, MINIO_ROOT_PASSWORD와 동일
+      MLFLOW_S3_ENDPOINT_URL: http://mlflow-artifact-store:9000 # AWS S3의 즈소, MinIO의 주소와 같음
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        mc config host add mlflowminio http://mlflow-artifact-store:9000 minio qwer1234 &&
+        mc mb --ignore-existing mlflowminio/mlflow
+        mlflow server \
+        --backend-store-uri postgresql://mlflowuser:qwer1234@mlflow-db/mlflowdatabase \
+        --default-artifact-root s3://mlflow/ \
+        --host 0.0.0.0
+      # MinIO 초기 킷 생성 후 MLflow 서버 실행
+      # mc config ~ : MinIO Client 를 활용해 MinIO 서버에 호스트를 등록합니다.
+      # mc mb ~ : 등록된 호스트를 통해 초기 버켓을 생성합니다.
+      # mlflow server : MLflow 서버를 동작시킵니다.
+      # --backend-store-uri : 명시된 정보를 통해 PostgreSQL DB 와 연결합니다.
+      # --default-artifact-root : 명시된 버켓을 통해 MinIO 의 초기 버켓과 연결합니다.
